@@ -1,0 +1,100 @@
+name: Update Yandex Music
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: update-yandex-music
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Detect update
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/detect-update.sh
+
+      - name: Install Nix
+        if: steps.detect.outputs.update == 'true' && steps.detect.outputs.skip != 'true'
+        uses: cachix/install-nix-action@v32
+        with:
+          github_access_token: ${{ github.token }}
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Prepare update
+        id: prepare
+        if: steps.detect.outputs.update == 'true' && steps.detect.outputs.skip != 'true'
+        env:
+          LATEST: ${{ steps.detect.outputs.latest }}
+          DEB_FILE: ${{ steps.detect.outputs.deb_file }}
+          EXPECTED_SHA512: ${{ steps.detect.outputs.sha512 }}
+          EXPECTED_SIZE: ${{ steps.detect.outputs.size }}
+        run: bash scripts/prepare-update.sh
+
+      - name: Check package
+        if: steps.detect.outputs.update == 'true' && steps.detect.outputs.skip != 'true'
+        run: bash scripts/check-package.sh
+
+      - name: Build package
+        id: build
+        if: steps.detect.outputs.update == 'true' && steps.detect.outputs.skip != 'true'
+        run: bash scripts/build-package.sh
+
+      - name: Smoke test
+        if: steps.detect.outputs.update == 'true' && steps.detect.outputs.skip != 'true'
+        env:
+          PKG: ${{ steps.build.outputs.out }}
+          SMOKE_LOG: ${{ runner.temp }}/smoke.log
+        run: bash scripts/smoke-test.sh "$PKG"
+
+      - name: Commit update
+        if: steps.detect.outputs.update == 'true' && steps.detect.outputs.skip != 'true'
+        env:
+          BRANCH: ${{ steps.detect.outputs.branch }}
+          CURRENT: ${{ steps.detect.outputs.current }}
+          LATEST: ${{ steps.detect.outputs.latest }}
+        run: bash scripts/commit-update.sh
+
+      - name: Create draft PR
+        if: steps.detect.outputs.update == 'true' && steps.detect.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.detect.outputs.branch }}
+          CURRENT: ${{ steps.detect.outputs.current }}
+          LATEST: ${{ steps.detect.outputs.latest }}
+          RELEASE: ${{ steps.detect.outputs.release }}
+          DEB_URL: ${{ steps.prepare.outputs.url }}
+          SHA512: ${{ steps.detect.outputs.sha512 }}
+          REPO: ${{ github.repository }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+        run: bash scripts/create-pr.sh
+
+      - name: Report failure
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT: ${{ steps.detect.outputs.current }}
+          LATEST: ${{ steps.detect.outputs.latest }}
+          RELEASE: ${{ steps.detect.outputs.release }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/report-failure.sh
